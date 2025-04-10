@@ -160,3 +160,32 @@ resource "aws_instance" "workers" {
 
   tags = { Name = "k8s-worker-${count.index + 1}" }
 }
+
+
+# EC2 Instance para Rancher com K3s
+resource "aws_instance" "rancher_k3s" {
+  ami                    = var.ami_id
+  instance_type          = "t3.medium"
+  subnet_id              = aws_subnet.public_subnet.id
+  vpc_security_group_ids = [aws_security_group.k8s_cluster_sg.id]
+  key_name               = var.key_pair_name
+
+  user_data = <<-EOF
+              #!/bin/bash
+              curl -sfL https://get.k3s.io | sh -
+              sleep 30
+              export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+              helm repo add rancher-stable https://releases.rancher.com/server-charts/stable
+              kubectl create namespace cattle-system
+              helm install rancher rancher-stable/rancher \
+                --namespace cattle-system \
+                --set hostname=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4).sslip.io \
+                --set replicas=1 \
+                --set bootstrapPassword=Admin12345! \
+                --set ingress.tls.source=rancher
+              EOF
+
+  tags = {
+    Name = "rancher-k3s-server"
+  }
+}
