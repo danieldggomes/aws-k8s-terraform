@@ -147,6 +147,23 @@ resource "aws_instance" "control_plane" {
   vpc_security_group_ids = [aws_security_group.k8s_cluster_sg.id]
   key_name               = var.key_pair_name
 
+  provisioner "remote-exec" {
+    inline = [
+      "sleep 60",
+      # copia o comando da instância Rancher
+      "scp -o StrictHostKeyChecking=no -i /home/ubuntu/.ssh/seu-arquivo.pem ubuntu@${aws_instance.rancher_k3s.public_ip}:/home/ubuntu/import_cmd.sh .",
+      "chmod +x import_cmd.sh",
+      "sudo su -c \"$(cat import_cmd.sh)\""
+    ]
+
+    connection {
+      type        = "ssh"
+      user        = "ubuntu"
+      private_key = file("~/.ssh/${var.key_pair_name}.pem")
+      host        = self.public_ip
+    }
+  }
+
   tags = { Name = "k8s-control-plane" }
 }
 
@@ -172,6 +189,8 @@ resource "aws_instance" "rancher_k3s" {
 
   user_data = <<-EOF
               #!/bin/bash
+              apt update
+              apt install -y jq curl
               curl -sfL https://get.k3s.io | sh -
               sleep 30
               export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
@@ -181,10 +200,36 @@ resource "aws_instance" "rancher_k3s" {
                 --namespace cattle-system \
                 --set hostname=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4).sslip.io \
                 --set replicas=1 \
-                --set bootstrapPassword=Admin12345! \
-                --set ingress.tls.source=rancher
+                --set bootstrapPassword=dataprev00! \
+                --set ingress.tls.source=rancher \
               EOF
 
+  provisioner "remote-exec" {
+    inline = [
+      "sleep 180", # Aguarda o Rancher iniciar completamente
+      "sudo chmod 644 /etc/rancher/k3s/k3s.yaml",
+      "export KUBECONFIG=/etc/rancher/k3s/k3s.yaml",
+      "kubectl -n cattle-system rollout status deploy/rancher",
+      "RANCHER_URL=https://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4).sslip.io",
+
+      "LOGINRESPONSE=$(curl -skX POST $RANCHER_URL/v3-public/localProviders/local?action=login -H 'content-type: application/json' -d '{\"username\":\"admin\",\"password\":\"dataprev00!\"}')",
+      "LOGINTOKEN=$(echo $LOGINRESPONSE | jq -r .token)",
+
+      "CLUSTERID=$(curl -skX POST $RANCHER_URL/v3/cluster -H \"Authorization: Bearer $LOGINTOKEN\" -H 'Content-Type: application/json' -d '{\"type\":\"cluster\",\"name\":\"imported-cluster\"}' | jq -r .id)",
+
+      "curl -skX POST $RANCHER_URL/v3/clusterregistrationtoken -H \"Authorization: Bearer $LOGINTOKEN\" -H 'Content-Type: application/json' -d \"{\\\"type\\\":\\\"clusterRegistrationToken\\\",\\\"clusterId\\\":\\\"$CLUSTERID\\\"}\" > token.json",
+
+      "IMPORT_CMD=$(cat token.json | jq -r '.manifestUrl' | xargs curl -sk | grep 'kubectl apply' | sed 's/^.*kubectl/kubectl/' | sed 's/.$//')",
+      "echo $IMPORT_CMD > /home/ubuntu/import_command.sh"
+    ]
+
+    connection {
+      type        = "ssh"
+      user        = "ubuntu"
+      private_key = file("~/.ssh/${var.key_pair_name}.pem")
+      host        = self.public_ip
+    }
+  }
   tags = {
     Name = "rancher-k3s-server"
   }
